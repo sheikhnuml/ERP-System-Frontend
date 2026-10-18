@@ -25,6 +25,16 @@ const niceMax = (v) => {
   return m * p;
 };
 
+// FIX 3: escape text before putting it inside the print window HTML
+const esc = (s) =>
+  String(s ?? '').replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  }[c]));
+
 const toYMD = (d) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
@@ -352,6 +362,7 @@ function DateRangeCalendarPopover({
 function RevenueChart({
   points,
   mode,
+  hasDates,
   periodTotal,
   periodCount,
   isLoading,
@@ -392,6 +403,13 @@ function RevenueChart({
   const labelStep = Math.max(1, Math.ceil(n / 7));
   const hp = hover !== null && points[hover] ? points[hover] : null;
 
+  const subtitle =
+    mode === 'singleDay'
+      ? 'Transactions logged on selected date'
+      : mode === 'tx'
+      ? 'Most recent transactions (sales records carry no date)'
+      : `Daily sales breakdown (${rangeLabel})`;
+
   return (
     <section className="bg-[#FFFFFF] rounded-xl border border-slate-200 shadow-xs p-4 sm:p-5 flex flex-col h-full">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
@@ -404,11 +422,7 @@ function RevenueChart({
               {periodCount} Sales
             </span>
           </div>
-          <p className="text-[11px] text-slate-500 mt-0.5">
-            {mode === 'singleDay'
-              ? 'Transactions logged on selected date'
-              : `Daily sales breakdown (${rangeLabel})`}
-          </p>
+          <p className="text-[11px] text-slate-500 mt-0.5">{subtitle}</p>
         </div>
 
         {/* Single Calendar Trigger & Print Trigger inside Chart Header */}
@@ -450,7 +464,7 @@ function RevenueChart({
       {/* Period Revenue Sub-Banner */}
       <div className="mt-3 flex items-baseline justify-between bg-[#F8FAFC] px-3.5 py-2 rounded-lg border border-slate-200/80">
         <span className="text-[11px] font-semibold text-slate-500">
-          Selected Period Revenue:
+          {hasDates ? 'Selected Period Revenue:' : 'Total Revenue (sale dates unavailable):'}
         </span>
         <span className="text-base font-black text-[#0F52BA] font-mono">
           {isLoading ? '...' : `Rs ${periodTotal.toLocaleString()}`}
@@ -800,15 +814,22 @@ export default function Dashboard() {
     return sales.reduce((sum, sale) => sum + Number(sale.total_price || 0), 0);
   }, [sales]);
 
+  // FIX 2: know whether the sales API sends any usable date at all
+  const hasAnyDates = useMemo(() => sales.some(s => saleDate(s)), [sales]);
+
   // Filter Sales by Selected Calendar Date Range
+  // - if sales carry dates: keep only sales inside the range (undated ones are excluded,
+  //   so totals and chart always agree)
+  // - if no sale has a date: date filtering is impossible, so use all sales
   const filteredPeriodSales = useMemo(() => {
+    if (!hasAnyDates) return sales;
     return sales.filter(s => {
       const d = saleDate(s);
-      if (!d) return true;
+      if (!d) return false;
       const ymd = toYMD(d);
       return ymd >= startDate && ymd <= endDate;
     });
-  }, [sales, startDate, endDate]);
+  }, [sales, startDate, endDate, hasAnyDates]);
 
   const periodRevenue = useMemo(() => {
     return filteredPeriodSales.reduce((sum, s) => sum + Number(s.total_price || 0), 0);
@@ -820,6 +841,22 @@ export default function Dashboard() {
 
   // Dynamic Chart & Daily Breakdown Table Data for Selected Range
   const trend = useMemo(() => {
+    // FIX 2: no dates in the API -> fall back to a per-transaction chart
+    if (!hasAnyDates) {
+      const recent = [...filteredPeriodSales].slice(0, 20).reverse();
+      return {
+        mode: 'tx',
+        points: recent.map((s, idx) => ({
+          dateKey: '',
+          fullDate: `Transaction #${idx + 1}`,
+          label: `#${idx + 1}`,
+          value: Number(s.total_price || 0),
+          units: Number(s.quantity_sold || 0),
+          count: 1
+        }))
+      };
+    }
+
     const startObj = parseYMD(startDate);
     const endObj = parseYMD(endDate);
     const diffDays = Math.max(1, Math.round((endObj - startObj) / (1000 * 60 * 60 * 24)) + 1);
@@ -875,7 +912,7 @@ export default function Dashboard() {
       mode: 'day',
       points: Array.from(buckets.values())
     };
-  }, [filteredPeriodSales, startDate, endDate]);
+  }, [filteredPeriodSales, startDate, endDate, hasAnyDates]);
 
   // Top Selling Products (Filtered by Selected Date Range)
   const topSelling = useMemo(() => {
@@ -934,7 +971,12 @@ export default function Dashboard() {
   // Custom A4 Print Generator
   const handleExecuteCustomPrint = () => {
     const w = window.open('', '_blank', 'width=840,height=900');
-    if (!w) return;
+
+    // FIX 4: tell the user when the browser blocks the print window
+    if (!w) {
+      alert('Print window was blocked by your browser. Please allow popups for this site and try again.');
+      return;
+    }
 
     const pts = trend.points;
     const W = 680, H = 200;
@@ -960,12 +1002,14 @@ export default function Dashboard() {
 
     const activeDaysRows = pts.filter(p => p.value > 0 || pts.length <= 15);
 
+    const periodLabelForPrint = hasAnyDates ? rangeDisplayLabel : 'All recorded sales (sale dates unavailable)';
+
     w.document.write(`
       <!DOCTYPE html>
       <html>
       <head>
         <meta charset="utf-8" />
-        <title>Analytics Report - ${rangeDisplayLabel}</title>
+        <title>Analytics Report - ${esc(periodLabelForPrint)}</title>
         <style>
           @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap');
           @page { margin: 12mm; size: A4 portrait; }
@@ -992,11 +1036,11 @@ export default function Dashboard() {
         <div class="header">
           <div>
             <div class="brand">SHEIKH'S ERP &bull; REVENUE & ANALYTICS REPORT</div>
-            <div class="sub">Selected Period: <strong>${rangeDisplayLabel}</strong></div>
+            <div class="sub">Selected Period: <strong>${esc(periodLabelForPrint)}</strong></div>
           </div>
           <div style="text-align: right;">
             <div style="font-weight: 700; color: #0F52BA;">CUSTOM ANALYTICS STATEMENT</div>
-            <div class="sub">Generated: ${new Date().toLocaleString('en-PK')}</div>
+            <div class="sub">Generated: ${esc(new Date().toLocaleString('en-PK'))}</div>
           </div>
         </div>
 
@@ -1023,8 +1067,8 @@ export default function Dashboard() {
 
         ${printOptions.includeGraph && n > 0 ? `
           <div class="section-box">
-            <div class="section-title">Visual Revenue Trend (${rangeDisplayLabel})</div>
-            <svg viewBox="0 0 ${W}${H}" style="width: 100%; height: auto;">
+            <div class="section-title">Visual Revenue Trend (${esc(periodLabelForPrint)})</div>
+            <svg viewBox="0 0 ${W} ${H}" style="width: 100%; height: auto;">
               <defs>
                 <linearGradient id="pFill" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="0%" stop-color="#0F52BA" stop-opacity="0.25" />
@@ -1039,7 +1083,7 @@ export default function Dashboard() {
                 `;
               }).join('')}
               ${pts.map((p, i) => i % labelStep === 0 ? `
-                <text x="${x(i)}" y="${H - 6}" text-anchor="middle" font-size="9" fill="#64748b">${p.label}</text>
+                <text x="${x(i)}" y="${H - 6}" text-anchor="middle" font-size="9" fill="#64748b">${esc(p.label)}</text>
               ` : '').join('')}
               <path d="${area}" fill="url(#pFill)" />
               <path d="${line}" fill="none" stroke="#0F52BA" stroke-width="2.2" />
@@ -1065,7 +1109,7 @@ export default function Dashboard() {
                 ${activeDaysRows.map((r, idx) => `
                   <tr>
                     <td class="mono">${idx + 1}</td>
-                    <td style="font-weight: 600;">${r.fullDate || r.label}</td>
+                    <td style="font-weight: 600;">${esc(r.fullDate || r.label)}</td>
                     <td class="text-right mono">${r.count || 0}</td>
                     <td class="text-right mono">${r.units || 0} pcs</td>
                     <td class="text-right mono" style="font-weight: 700; color: #0F52BA;">Rs ${r.value.toLocaleString()}</td>
@@ -1093,10 +1137,10 @@ export default function Dashboard() {
                 ${topSelling.map((item, idx) => `
                   <tr>
                     <td class="mono font-bold">#${idx + 1}</td>
-                    <td style="font-weight: 600;">${item.label}</td>
-                    <td class="mono">${item.sku}</td>
+                    <td style="font-weight: 600;">${esc(item.label)}</td>
+                    <td class="mono">${esc(item.sku)}</td>
                     <td class="text-right mono">${item.qty} pcs</td>
-                    <td class="text-right mono" style="font-weight: 700; color: #10B981;">${item.display}</td>
+                    <td class="text-right mono" style="font-weight: 700; color: #10B981;">${esc(item.display)}</td>
                   </tr>
                 `).join('')}
               </tbody>
@@ -1265,6 +1309,7 @@ export default function Dashboard() {
           <RevenueChart
             points={trend.points}
             mode={trend.mode}
+            hasDates={hasAnyDates}
             periodTotal={periodRevenue}
             periodCount={filteredPeriodSales.length}
             isLoading={isLoading}
@@ -1293,7 +1338,7 @@ export default function Dashboard() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <BarListCard
           title="Top Selling Products"
-          subtitle={`Ranked by revenue (${rangeDisplayLabel})`}
+          subtitle={hasAnyDates ? `Ranked by revenue (${rangeDisplayLabel})` : 'Ranked by revenue (all recorded sales)'}
           items={topSelling}
           color="#0F52BA"
           isLoading={isLoading}
@@ -1391,7 +1436,9 @@ export default function Dashboard() {
                 Period Sales Activity
               </h2>
               <p className="text-[11px] text-slate-500 mt-1 leading-none">
-                Checkouts in selected range ({rangeDisplayLabel})
+                {hasAnyDates
+                  ? `Checkouts in selected range (${rangeDisplayLabel})`
+                  : 'Latest checkouts (sale dates unavailable)'}
               </p>
             </div>
             <button
@@ -1460,7 +1507,7 @@ export default function Dashboard() {
                     Custom Analytics Print Studio
                   </h3>
                   <p className="text-[10px] text-slate-500">
-                    Range: <strong>{rangeDisplayLabel}</strong> ({filteredPeriodSales.length} transactions)
+                    Range: <strong>{hasAnyDates ? rangeDisplayLabel : 'All recorded sales'}</strong> ({filteredPeriodSales.length} transactions)
                   </p>
                 </div>
               </div>
